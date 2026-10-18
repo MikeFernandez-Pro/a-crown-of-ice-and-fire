@@ -4,10 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>A Crown of Ice and Fire</title>
+    <!-- the crown in black on light browser themes, in white on dark ones -->
+    <link rel="icon" type="image/png" href="/favicon-black.png" media="(prefers-color-scheme: light)" />
+    <link rel="icon" type="image/png" href="/favicon-white.png" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#000" />
     <style>
       * { margin: 0; padding: 0; }
+      /* the root's own black: what Safari paints beside the page in landscape on
+         an iPhone and tints its bars with (blended under the body's background,
+         so the body stays transparent unless the backdrop is "CSS color") */
+      html { background: #000; }
       /* shows through the canvas when the backdrop is "CSS color" (the GUI sets the colour) */
-      body { background: #000; overflow: hidden; }
+      body { overflow: hidden; }
       canvas { display: block; }
       .note { position: fixed; inset: 0; display: grid; place-items: center; color: #ddd; font: 15px system-ui, sans-serif; }
 

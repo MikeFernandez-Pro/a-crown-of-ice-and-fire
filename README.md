@@ -33,3 +33,4 @@ Needs a browser with WebGPU (recent Chrome or Edge).
 - Fluid, SDF constraint, gold surface and ice material: [Three Blocks](https://threejs-blocks.com) (an npm dependency, under its own PolyForm Noncommercial licence: this project is non-commercial).
 - Rendering: [three.js](https://threejs.org) `WebGPURenderer` and TSL.
 - Environment maps from the three.js examples: `pedestrian_overpass`, `royal_esplanade` and `san_giuseppe_bridge` are from [Poly Haven](https://polyhaven.com) (CC0); `lobe.hdr` also comes from the three.js examples.
+- Favicon: [Monarque icônes créées par iconfield - Flaticon](https://www.flaticon.com/fr/icones-gratuites/monarque).

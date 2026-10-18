@@ -793,8 +793,14 @@ function applyBackdrop(kind) {
   scene.backgroundBlurriness = look.backdropBlur;
   scene.backgroundIntensity = look.backdropBrightness;
   renderer.setClearColor(0x000000, kind === 'CSS color' ? 0 : 1);
+  applyCssColor();
 }
-const applyCssColor = (v) => (document.body.style.background = v);
+// The body only takes the colour while it is the backdrop: Safari blends the
+// body's background over the root's black for what it paints around the page
+// (the sides in landscape on an iPhone, the tint of its bars).
+function applyCssColor() {
+  document.body.style.background = look.backdrop === 'CSS color' ? look.cssColor : '';
+}
 lookFolder.add(look, 'environment', Object.keys(ENVIRONMENTS)).name('environment').onChange(applyEnvironment);
 lookFolder.add(look, 'backdrop', ['CSS color', 'environment', 'gradient']).name('behind').onChange(applyBackdrop);
 function applyGradient(name) {
@@ -824,7 +830,6 @@ lookFolder.add(look, 'backdropBlur', 0, 1, 0.01).name('environment blur').onChan
 // the gold's reflections bake the intensity in, so a change re-shades it
 lookFolder.add(scene, 'environmentIntensity', 0, 2, 0.01).name('lighting').onFinishChange(() => goldSurface && shadeGold(goldSurface));
 applyLook();
-applyCssColor(look.cssColor);
 await applyEnvironment(look.environment);
 loaded(1);
 
