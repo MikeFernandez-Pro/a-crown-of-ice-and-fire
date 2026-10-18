@@ -31,7 +31,22 @@ import {
   cameraFar,
   cameraProjectionMatrixInverse,
   cameraWorldMatrix,
+  pass,
+  mrt,
+  output,
+  emissive,
+  time,
+  hash,
+  uv,
+  float,
+  vec3,
+  color,
+  instanceIndex,
+  instancedArray,
+  varying,
+  cameraViewMatrix,
 } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -47,11 +62,11 @@ import { MeshTransmissionNodeMaterial } from 'three-blocks/transmission';
 import { isosurface } from './marching.js';
 import { weld, rounded } from './rounding.js';
 
-const MODEL = '/ice-crystal-crown.glb';
+const MODEL = `${import.meta.env.BASE_URL}ice-crystal-crown.glb`;
 // what bake-sdf.mjs printed for crystal-field.bin:
 //   node bake-sdf.mjs ice-crystal-crown.glb crystal-field.bin 200 --margin 0.03
 const FIELD = {
-  url: '/crystal-field.bin',
+  url: `${import.meta.env.BASE_URL}crystal-field.bin`,
   dims: [198, 186, 200],
   min: [-0.5406786456980657, -0.047216897551546455, -0.5461400612113403],
   voxelSize: 0.0054614006121134024,
@@ -95,6 +110,11 @@ const TIERS = {
   low: { grid: 'atomic + workgroup', stepRate: 120, dpr: 0.75, antialias: true, particles: 16384, solver: 2, maxSubsteps: 2, useDirection: false, samples: 1, prism: 0, blur: 0, surfaceScale: 1, depthSmoothing: 4, thicknessScale: 0.25, filterIterations: 1, filterRadius: 8 },
 };
 const tierName = new URLSearchParams(location.search).get('tier') ?? 'medium';
+// #debug shows the panel, the timings, the tier bar and the leak count; without
+// it the page is just the crown. GPU timestamps cost a little, so they are only
+// asked for in debug, and switching in or out of #debug reloads to match.
+const debug = location.hash === '#debug';
+window.addEventListener('hashchange', () => location.reload());
 const tier = TIERS[tierName] ?? TIERS.baseline;
 // live isolation switches: each one removes a system so its cost shows up as the drop
 const isolate = { sim: true, gold: true, transmission: true };
@@ -144,6 +164,8 @@ const settings = {
   iceTint: '#a9d4ff',
   clarity: 0.9,
   grain: 0.09,
+  opacity: 0.01, // 0 the ice shows only what is behind it, 1 only its own colour
+  iceColor: '#f2f8ff', // the ice's own colour: what milky ice shows, and a light tint on what it lets through
   prism: tier.prism,
   // gold
   fill: 0.35,
@@ -163,14 +185,19 @@ const settings = {
 const toField = (sceneDistance) => sceneDistance / (DISPLAY * SIM);
 
 // --- renderer, scene, camera
-const renderer = new THREE.WebGPURenderer({ antialias: tier.antialias, trackTimestamp: true });
+const renderer = new THREE.WebGPURenderer({ antialias: tier.antialias, trackTimestamp: debug });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, tier.dpr));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 document.body.appendChild(renderer.domElement);
+// the loading veil in index.html: its sigil fades away from the top down as
+// the crown loads (--p, 0 to 1), and the veil lifts on the first frame
+const veil = document.getElementById('veil');
+const loaded = (progress) => veil?.style.setProperty('--p', progress.toFixed(3));
 await renderer.init();
 if (!renderer.backend.isWebGPUBackend) {
+  veil?.remove();
   document.body.insertAdjacentHTML('beforeend', '<p class="note">This page needs WebGPU: the fluid runs in compute shaders.</p>');
   throw new Error('WebGPU is required');
 }
@@ -193,7 +220,7 @@ const GRADIENTS = {
   'cool steel': { top: '#6f7f96', bottom: '#101218', middle: '#0b0d14', middleStrength: 0, height: 0.575, softness: 0.85 },
   // icy blue above, embers below, a gold glow where they meet
   // near-black and almost flat: the crown carries all the colour
-  charcoal: { top: '#1c1c1c', bottom: '#212121', middle: '#1c1c1c', middleStrength: 0.36, height: 0.5, softness: 0.99 },
+  charcoal: { top: '#0d0d0d', bottom: '#141414', middle: '#000000', middleStrength: 0.36, height: 0.5, softness: 0.99 },
   'ice & fire': { top: '#56b0f0', bottom: '#ff7847', middle: '#ffdc5c', middleStrength: 0.36, height: 0.5, softness: 0.99 },
 };
 // Drawn on a full-screen quad behind everything (first, without depth), so it
@@ -254,9 +281,23 @@ const crown = new THREE.Group();
 crown.scale.setScalar(DISPLAY);
 scene.add(crown);
 
+
 // --- the field
+// streamed, so the veil can follow it: it is most of what the page downloads.
+// Its decoded size is known from the grid (half floats), whatever the transfer encoding.
 const field = await fetch(FIELD.url)
-  .then((r) => r.arrayBuffer())
+  .then(async (response) => {
+    const bytes = new Uint8Array(FIELD.dims[0] * FIELD.dims[1] * FIELD.dims[2] * 2);
+    const reader = response.body.getReader();
+    for (let received = 0; ;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes.set(value, received);
+      received += value.length;
+      loaded(0.75 * (received / bytes.length));
+    }
+    return bytes.buffer;
+  })
   .then((buffer) => {
     const half = new Uint16Array(buffer);
     const data = new Float32Array(half.length);
@@ -267,6 +308,7 @@ const field = await fetch(FIELD.url)
 // the model, welded once for rounding; its centre, in field units, puts the
 // simulation round the origin
 const model = await new GLTFLoader().loadAsync(MODEL);
+loaded(0.8);
 let modelMesh;
 model.scene.traverse((o) => o.isMesh && (modelMesh = o));
 model.scene.updateMatrixWorld(true);
@@ -274,6 +316,7 @@ const modelGeometry = modelMesh.geometry.clone().applyMatrix4(modelMesh.matrixWo
 const welded = weld(modelGeometry);
 modelGeometry.computeBoundingBox();
 const centre = modelGeometry.boundingBox.getCenter(new THREE.Vector3());
+
 
 function surface(iso) {
   const { positions, index } = isosurface(field, iso);
@@ -303,7 +346,7 @@ function volume(geometry) {
 
 // --- the ice
 const ice = new MeshTransmissionNodeMaterial({
-  color: 0xf2f8ff,
+  color: settings.iceColor,
   roughness: settings.frost,
   ior: settings.ior,
   thickness: 0.08, // optical thickness: about one crystal wall, in scene units
@@ -348,12 +391,72 @@ const goldUniforms = {
   roughness: uniform(settings.goldRoughness),
   heat: uniform(settings.heat),
   heatColor: uniform(new THREE.Color(settings.heatColor)),
+  bloomHeat: uniform(1), // how much heat colour the gold's motion sends to the bloom
   keyDirection: uniform(new THREE.Vector3()), // towards the key light, view space
   keyColor: uniform(new THREE.Color()),
   backDirection: uniform(new THREE.Vector3()), // towards the back light, view space
   backColor: uniform(new THREE.Color()),
   crownMatrix: uniform(new THREE.Matrix4()),
 };
+
+// PROTOTYPE: the gold's bloom follows its motion. Each particle glows by how
+// fast it moves plus how hard it speeds up or slows down (its velocity's change
+// since the last frame), smoothed over a few frames so a splash flares and
+// fades rather than flickering. A compute pass keeps last frame's velocity and
+// the smoothed glow per particle; a sprite per particle adds that glow to the
+// bloom's `emissive` buffer only (its colour is zero, so without the bloom it
+// shows nothing). The sprites skip the depth test, so the ice in front can't
+// hide them, and drop themselves where they sit behind the gold's own
+// reconstructed surface instead.
+const motionGlow = {
+  speedGain: uniform(1 / 6), // glow per simulation unit/s of speed
+  accelGain: uniform(1 / 80), // glow per simulation unit/s² of acceleration
+  smoothing: uniform(0.25), // share of the new value taken each frame
+  size: uniform(1.4), // sprite size against the gold's splat diameter
+  frameDelta: uniform(1 / 60),
+};
+let motionGlowParts = null;
+function buildMotionGlow(count, splatRadius) {
+  const velocities = fluid.buffers.velocities;
+  const positions = fluid.buffers.positions;
+  const previous = instancedArray(count, 'vec3');
+  const glow = instancedArray(count, 'float');
+  const compute = Fn(() => {
+    const v = velocities.element(instanceIndex);
+    const acceleration = v.sub(previous.element(instanceIndex)).length().div(motionGlow.frameDelta.max(1e-4));
+    const target = v.length().mul(motionGlow.speedGain).add(acceleration.mul(motionGlow.accelGain)).min(3);
+    glow.element(instanceIndex).assign(mix(glow.element(instanceIndex), target, motionGlow.smoothing));
+    previous.element(instanceIndex).assign(v);
+  })().compute(count);
+
+  const material = new THREE.SpriteNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending });
+  const world = goldUniforms.crownMatrix.mul(vec4(positions.element(instanceIndex), 1)).xyz;
+  material.positionNode = world;
+  material.scaleNode = motionGlow.size.mul(splatRadius * 2);
+  const amount = varying(glow.element(instanceIndex));
+  const distance = varying(cameraViewMatrix.mul(vec4(world, 1)).z.negate()); // the particle's centre, from the camera
+  const front = goldSurface.surfaceDataNode;
+  material.colorNode = Fn(() => {
+    const surface = front.sample(screenUV).x; // the gold's front surface here, 0 where there is none
+    surface.lessThanEqual(0).discard();
+    distance.greaterThan(surface.add(splatRadius * 2)).discard();
+    const spot = smoothstep(0, 0.5, uv().sub(0.5).length()).oneMinus();
+    emissive.assign(goldUniforms.heatColor.mul(goldUniforms.bloomHeat).mul(amount).mul(spot));
+    return vec3(0);
+  })();
+  const sprite = new THREE.Sprite(material);
+  sprite.count = count;
+  sprite.frustumCulled = false;
+  scene.add(sprite);
+  motionGlowParts = { compute, sprite, material };
+}
+function disposeMotionGlow() {
+  if (!motionGlowParts) return;
+  scene.remove(motionGlowParts.sprite);
+  motionGlowParts.material.dispose();
+  motionGlowParts.compute.dispose?.();
+  motionGlowParts = null;
+}
 const gold = new THREE.MeshBasicNodeMaterial();
 gold.vertexNode = vec4(positionGeometry.xy, 0, 1); // a full-screen quad
 const goldLayer = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), gold);
@@ -392,7 +495,8 @@ function shadeGold(surfaceRenderer) {
       .add(goldUniforms.keyColor.mul(ggx(n, v, goldUniforms.keyDirection, goldUniforms.roughness)))
       .add(goldUniforms.backColor.mul(ggx(n, v, goldUniforms.backDirection, goldUniforms.roughness)));
     // molten gold glows from within where it runs deep
-    const glow = goldUniforms.heatColor.mul(goldUniforms.heat).mul(smoothstep(0.02, 0.6, thickness));
+    const deep = smoothstep(0.02, 0.6, thickness);
+    const glow = goldUniforms.heatColor.mul(goldUniforms.heat).mul(deep);
     return fresnel.mul(lit).add(glow);
   })();
   gold.depthNode = viewZToPerspectiveDepth(data.x.negate(), cameraNear, cameraFar);
@@ -469,6 +573,7 @@ async function buildFluid() {
   });
   goldLayer.userData.spacing = spacing;
   shadeGold(goldSurface);
+  buildMotionGlow(count, spacing * settings.blobSize * DISPLAY);
 }
 
 // the field, trilinear, at a point in field units
@@ -536,6 +641,7 @@ async function probeSeeds(buffer, count, spacing) {
 }
 
 function disposeFluid() {
+  disposeMotionGlow();
   goldSurface?.dispose();
   fluid?.dispose();
   constraint?.dispose();
@@ -560,14 +666,18 @@ function rebuildFluid() {
 
 rebuildIce();
 await rebuildFluid();
+loaded(0.95);
 
 // --- controls
 const gui = new GUI({ title: 'Melted gold in ice' });
+if (!debug) gui.hide();
 const iceFolder = gui.addFolder('Ice');
 iceFolder.add(settings, 'sharpness', 0, 1, 0.01).onFinishChange(rebuildIce);
 // the ice between the crown's surface and the gold
 iceFolder.add(settings, 'iceThickness', 0.004, 0.03, 0.001).name('thickness').onFinishChange(rebuildFluid);
 iceFolder.add(settings, 'frost', 0, 1, 0.01).onChange(() => applyIce());
+iceFolder.add(settings, 'opacity', 0, 1, 0.01).name('opacity (milky)').onChange(() => applyIce());
+iceFolder.addColor(settings, 'iceColor').name('ice color').onChange((v) => ice.color.set(v));
 iceFolder.add(settings, 'ior', 1, 1.6, 0.01).name('IOR').onChange(() => applyIce());
 iceFolder.addColor(settings, 'iceTint').name('tint').onChange((v) => ice.attenuationColor.set(v));
 iceFolder.add(settings, 'clarity', 0.05, 5, 0.05).onChange(() => applyIce());
@@ -591,6 +701,7 @@ function applyIce() {
   ice.ior = 1 + (settings.ior - 1) * k;
   ice.attenuationDistance = settings.clarity / Math.max(k, 0.05);
   ice.chromaticAberration = settings.prism * k;
+  ice.transmission = 1 - settings.opacity;
   ice.roughness = settings.frost * noisy;
   ice.ditherStrength = noise.dither * noisy;
   ice.surfaceDistortion = settings.grain * noisy;
@@ -620,7 +731,7 @@ const LOOKS = {
   // tuned by eye on the scale-corrected look (2026-10-18)
   frosted: { thickness: 0.09 / DISPLAY, distortionScale: 0.7, ditherScale: 1359, frost: 0.25 },
 };
-const look = { preset: 'frosted', strength: 0.65, thickness: 0.09, environment: 'san_giuseppe_bridge_2k.hdr', backdrop: 'gradient', cssColor: '#15161a', gradient: 'charcoal', gradientBottom: '#101218', gradientTop: '#6f7f96', gradientMiddle: '#0b0d14', backdropBrightness: 0.35, backdropBlur: 0.3 };
+const look = { preset: 'frosted', strength: 0.65, thickness: 0.09, environment: 'royal_esplanade_2k.hdr.jpg', backdrop: 'gradient', cssColor: '#15161a', gradient: 'charcoal', gradientBottom: '#101218', gradientTop: '#6f7f96', gradientMiddle: '#0b0d14', backdropBrightness: 0.35, backdropBlur: 0.3 };
 function applyLook() {
   const preset = LOOKS[look.preset];
   look.thickness = preset.thickness * DISPLAY;
@@ -647,7 +758,7 @@ const ENVIRONMENTS = {
     'pedestrian_overpass_1k.hdr',
     'royal_esplanade_2k.hdr.jpg',
     'san_giuseppe_bridge_2k.hdr',
-  ].map((file) => [file, `/hdr/${file}`])),
+  ].map((file) => [file, `${import.meta.env.BASE_URL}hdr/${file}`])),
 };
 const loadedEnvironments = new Map([['room (procedural)', { background: roomEnvironment, environment: roomEnvironment }]]);
 async function loadEnvironment(name) {
@@ -715,6 +826,7 @@ lookFolder.add(scene, 'environmentIntensity', 0, 2, 0.01).name('lighting').onFin
 applyLook();
 applyCssColor(look.cssColor);
 await applyEnvironment(look.environment);
+loaded(1);
 
 // PROTOTYPE: resolution, live. MSAA can only change on reload (the tier sets it).
 const view = { pixelRatio: renderer.getPixelRatio() };
@@ -875,21 +987,23 @@ const towards = (light, out) =>
 
 // --- PROTOTYPE: timing readout and the bottom bar
 // stats-gl: FPS, CPU ms, GPU ms (render passes) and CPT ms (compute passes)
-const stats = new Stats({ trackGPU: true, trackCPT: true, horizontal: true });
-document.body.appendChild(stats.dom);
-await stats.init(renderer);
+const stats = debug ? new Stats({ trackGPU: true, trackCPT: true, horizontal: true }) : null;
+if (stats) {
+  document.body.appendChild(stats.dom);
+  await stats.init(renderer);
+}
 
 const bar = document.createElement('div');
 bar.style.cssText = 'position:fixed;left:50%;bottom:12px;transform:translateX(-50%);display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:center;max-width:96vw;padding:8px 10px;background:#000c;color:#ddd;font:12px system-ui,sans-serif;border-radius:8px;z-index:10';
-document.body.appendChild(bar);
+if (debug) document.body.appendChild(bar);
 const state = document.createElement('div');
 state.style.cssText = 'position:fixed;right:12px;bottom:70px;padding:8px 10px;background:#000c;color:#bbb;font:11px ui-monospace,monospace;white-space:pre;border-radius:8px;z-index:10';
-document.body.appendChild(state);
+if (debug) document.body.appendChild(state);
 
 for (const name of Object.keys(TIERS)) {
   const a = document.createElement('a');
   a.textContent = name;
-  a.href = `?tier=${name}`;
+  a.href = `?tier=${name}#debug`; // the bar only shows in debug: stay there
   a.style.cssText = `padding:4px 10px;border-radius:5px;text-decoration:none;color:#fff;background:${name === tierName ? '#c8901e' : '#333'}`;
   bar.appendChild(a);
 }
@@ -939,7 +1053,7 @@ async function countLeak() {
     leakBusy = false;
   }
 }
-setInterval(countLeak, 2000);
+if (debug) setInterval(countLeak, 2000);
 
 function showState() {
   const size = renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -957,6 +1071,84 @@ function showState() {
   ];
   state.textContent = lines.join('\n');
 }
+
+// --- PROTOTYPE: post-processing: bloom on what glows. The scene renders
+// through a pass with a second output, `emissive`, which only the gold's motion
+// glow and the embers write; the bloom spreads that buffer at quarter
+// resolution and adds it back before the tone mapping. The emissive output
+// blends additively, so the ice drawn over the gold adds its zero instead of
+// erasing the glow underneath it. With post-processing off, the scene renders
+// straight to the screen as before.
+const fx = { post: true, bloom: true, strength: 0.1, radius: 0 };
+const scenePass = pass(scene, camera);
+const sceneOutputs = mrt({ output, emissive });
+sceneOutputs.setBlendMode('emissive', new THREE.BlendMode(THREE.AdditiveBlending));
+scenePass.setMRT(sceneOutputs);
+const goldBloom = bloom(scenePass.getTextureNode('emissive'), fx.strength, fx.radius, 0);
+goldBloom.setResolutionScale(0.25);
+const pipeline = new THREE.RenderPipeline(renderer, scenePass.getTextureNode('output').add(goldBloom));
+const bloomFolder = gui.addFolder('Bloom (prototype)');
+bloomFolder.add(fx, 'post').name('post-processing');
+bloomFolder.add(fx, 'bloom').name('bloom').onChange((on) => (goldBloom.strength.value = on ? fx.strength : 0));
+bloomFolder.add(fx, 'strength', 0, 3, 0.01).name('bloom strength').onChange((v) => fx.bloom && (goldBloom.strength.value = v));
+bloomFolder.add(fx, 'radius', 0, 1, 0.01).name('bloom radius').onChange((v) => (goldBloom.radius.value = v));
+bloomFolder.add(goldUniforms.bloomHeat, 'value', 0, 8, 0.01).name('gold glow');
+bloomFolder.add(motionGlow.speedGain, 'value', 0, 1, 0.005).name('glow from speed');
+bloomFolder.add(motionGlow.accelGain, 'value', 0, 0.1, 0.0005).name('glow from acceleration');
+bloomFolder.add(motionGlow.smoothing, 'value', 0.02, 1, 0.01).name('glow response');
+bloomFolder.add(motionGlow.size, 'value', 0.3, 4, 0.05).name('glow spot size');
+
+// --- PROTOTYPE: embers. Instanced sprites whose whole life is worked out in
+// the vertex stage from their index and the clock, so they cost no simulation.
+// Each rises from somewhere round the crown, drifts, flickers and fades, then
+// starts again from a new spot (its seeds change every cycle). They write their
+// glow to `emissive` too, so the bloom catches them.
+const atmosphere = { embers: true, emberCount: 50 };
+const crownCentre = uniform(new THREE.Vector3()); // the crown group's origin is its centre
+const embersUniforms = {
+  rise: uniform(1.5), // how far an ember climbs over its life, scene units
+  spread: uniform(0.85), // radius round the crown they start within
+  size: uniform(0.018),
+  brightness: uniform(2.5),
+  speed: uniform(1), // multiplies their rate of rise and their drift
+};
+const MAX_EMBERS = 1000;
+const emberMaterial = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+const emberRate = mix(0.12, 0.28, hash(instanceIndex.add(7919))).mul(embersUniforms.speed); // cycles a second
+const emberClock = time.mul(emberRate).add(hash(instanceIndex));
+const emberLife = emberClock.fract(); // 0 born, 1 gone
+const emberSeed = float(instanceIndex).add(emberClock.floor().mul(MAX_EMBERS)); // a new spot each cycle
+const emberAngle = hash(emberSeed.add(1)).mul(Math.PI * 2);
+const emberRadius = hash(emberSeed.add(2)).sqrt().mul(embersUniforms.spread);
+const emberWobble = time.mul(embersUniforms.speed).mul(1.3).add(hash(emberSeed.add(3)).mul(6.283));
+emberMaterial.positionNode = crownCentre.add(vec3(
+  emberAngle.cos().mul(emberRadius).add(emberWobble.sin().mul(0.09).mul(emberLife)),
+  hash(emberSeed.add(4)).sub(0.6).add(emberLife.mul(embersUniforms.rise)),
+  emberAngle.sin().mul(emberRadius).add(emberWobble.mul(0.8).cos().mul(0.09).mul(emberLife)),
+));
+emberMaterial.scaleNode = embersUniforms.size.mul(mix(0.5, 1.3, hash(emberSeed.add(5)))).mul(emberLife.mul(0.6).oneMinus());
+emberMaterial.colorNode = Fn(() => {
+  const spark = smoothstep(0, 0.5, uv().sub(0.5).length()).oneMinus(); // soft round dot
+  const flicker = time.mul(14).add(hash(instanceIndex.add(11)).mul(40)).sin().mul(0.25).add(0.75);
+  const fade = smoothstep(0, 0.08, emberLife).mul(smoothstep(0.5, 1, emberLife).oneMinus());
+  const heat = mix(color(0xff5a14), color(0xffcf73), hash(emberSeed.add(6)));
+  const glow = heat.mul(embersUniforms.brightness).mul(spark).mul(flicker).mul(fade);
+  emissive.assign(glow);
+  return glow;
+})();
+const embers = new THREE.Sprite(emberMaterial);
+embers.count = atmosphere.emberCount;
+embers.frustumCulled = false;
+scene.add(embers);
+
+const atmosphereFolder = gui.addFolder('Embers (prototype)');
+atmosphereFolder.add(atmosphere, 'embers').onChange((on) => (embers.visible = on));
+atmosphereFolder.add(atmosphere, 'emberCount', 0, MAX_EMBERS, 1).name('ember count').onChange((v) => (embers.count = v));
+atmosphereFolder.add(embersUniforms.brightness, 'value', 0, 8, 0.05).name('ember brightness');
+atmosphereFolder.add(embersUniforms.size, 'value', 0.004, 0.06, 0.001).name('ember size');
+atmosphereFolder.add(embersUniforms.rise, 'value', 0.2, 4, 0.05).name('ember rise');
+atmosphereFolder.add(embersUniforms.spread, 'value', 0.1, 2, 0.01).name('ember spread');
+atmosphereFolder.add(embersUniforms.speed, 'value', 0, 3, 0.01).name('ember speed');
 
 let inFlight = false;
 let frames = 0;
@@ -978,6 +1170,10 @@ renderer.setAnimationLoop(() => {
       gravity.set(0, -9.81, 0).applyQuaternion(inverse);
       fluid.ubos.gravity.value.copy(gravity);
       await fluid.step(renderer, dt);
+      if (motionGlowParts) {
+        motionGlow.frameDelta.value = dt;
+        renderer.compute(motionGlowParts.compute);
+      }
     }
     if (goldLayer.visible) {
       goldUniforms.crownMatrix.value.copy(crown.matrixWorld);
@@ -987,12 +1183,20 @@ renderer.setAnimationLoop(() => {
       goldUniforms.backColor.value.copy(backLight.color).multiplyScalar(backLight.intensity * 0.15);
       goldSurface.update(renderer, camera);
     }
-    renderer.render(scene, camera);
+    crownCentre.value.copy(crown.position);
+    if (fx.post) pipeline.render();
+    else renderer.render(scene, camera);
+    if (veil && !veil.classList.contains('lifted')) {
+      veil.classList.add('lifted');
+      veil.addEventListener('transitionend', () => veil.remove(), { once: true });
+    }
     // stats-gl reads renderer.info's timestamps; three fills them only when asked
-    renderer.resolveTimestampsAsync('render');
-    renderer.resolveTimestampsAsync('compute');
-    stats.update();
-    if (frames++ % 30 === 0) showState();
+    if (debug) {
+      renderer.resolveTimestampsAsync('render');
+      renderer.resolveTimestampsAsync('compute');
+      stats.update();
+      if (frames++ % 30 === 0) showState();
+    }
   })().finally(() => (inFlight = false));
 });
 
