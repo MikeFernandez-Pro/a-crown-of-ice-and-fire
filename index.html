@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A Crown of Ice and Fire</title>
+    <!-- the crown in black on light browser themes, in white on dark ones -->
+    <link rel="icon" type="image/png" href="./favicon-black.png" media="(prefers-color-scheme: light)" />
+    <link rel="icon" type="image/png" href="./favicon-white.png" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#000" />
+    <style>
+      * { margin: 0; padding: 0; }
+      /* the root's own black: what Safari paints beside the page in landscape on
+         an iPhone and tints its bars with (blended under the body's background,
+         so the body stays transparent unless the backdrop is "CSS color") */
+      html { background: #000; }
+      /* shows through the canvas when the backdrop is "CSS color" (the GUI sets the colour) */
+      body { overflow: hidden; }
+      canvas { display: block; }
+      .note { position: fixed; inset: 0; display: grid; place-items: center; color: #ddd; font: 15px system-ui, sans-serif; }
+
+      /* The veil while the crown loads: a sigil after Dark Souls III's eclipse,
+         in black and white hairlines. As the crown loads (--p, 0 to 1, set by
+         the page's script) the sigil fades away from the top down, the sun
+         first and the stream last, under a soft edge; the veil lifts on the
+         first frame (.lifted). */
+      @property --p { syntax: '<number>'; inherits: true; initial-value: 0; }
+      #veil {
+        position: fixed; inset: 0; z-index: 30;
+        display: grid; place-items: center;
+        background: #000;
+        transition: opacity 1.8s ease;
+      }
+      #veil.lifted { opacity: 0; pointer-events: none; }
+      #veil svg {
+        width: 120px; height: 260px; margin-bottom: 8vh; overflow: visible;
+        transition: --p 0.6s ease;
+        /* transparent above the edge, opaque below, across a soft band 30% of
+           the sigil tall: the edge runs from above the top (p = 0) to below
+           the bottom (p = 1) */
+        --edge: calc(var(--p) * 130% - 30%);
+        -webkit-mask-image: linear-gradient(to bottom, transparent var(--edge), #000 calc(var(--edge) + 30%));
+        mask-image: linear-gradient(to bottom, transparent var(--edge), #000 calc(var(--edge) + 30%));
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-M0C8Nmmp.js"></script>
+  </head>
+  <body>
+    <div id="veil">
+      <!-- the sun sits at the origin; one unit is one CSS pixel -->
+      <svg viewBox="-60 -60 120 260" fill="none" shape-rendering="geometricPrecision" aria-hidden="true">
+        <defs>
+          <linearGradient id="stream" x1="0" y1="12" x2="0" y2="190" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#fff" stop-opacity="1" />
+            <stop offset="0.55" stop-color="#fff" stop-opacity="0.7" />
+            <stop offset="1" stop-color="#fff" stop-opacity="0" />
+          </linearGradient>
+          <!-- softened: the rim reads much stronger than the hairline, so it is
+               blurred more, and the stream a little to match -->
+          <filter id="soft-rim" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="0.8" />
+            <!-- the blur spreads the rim's light thin: lift it back to white -->
+            <feComponentTransfer><feFuncA type="linear" slope="1.8" /></feComponentTransfer>
+          </filter>
+          <filter id="soft-stream" x="-400%" y="-5%" width="900%" height="110%"><feGaussianBlur stdDeviation="0.35" /></filter>
+        </defs>
+        <!-- the stream: a drop forming under the sun, a hairline pouring from it -->
+        <g filter="url(#soft-stream)">
+          <path d="M -2.2 10.2 C -0.9 12.4 -0.45 14.5 -0.3 17 L 0.3 17 C 0.45 14.5 0.9 12.4 2.2 10.2 Z" fill="#fff" />
+          <line x1="0" y1="16" x2="0" y2="190" stroke="url(#stream)" stroke-width="0.85" />
+        </g>
+        <!-- the sun: black, in a crisp white rim -->
+        <circle r="11" fill="#000" />
+        <circle r="11" stroke="#fff" stroke-width="1" filter="url(#soft-rim)" />
+      </svg>
+    </div>
+  </body>
+</html>
