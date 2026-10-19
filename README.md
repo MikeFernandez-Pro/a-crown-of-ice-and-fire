@@ -1,5 +1,7 @@
 # A Crown of Ice and Fire
 
+<a href="https://mikefernandez-pro.github.io/a-crown-of-ice-and-fire/"><img src="media/crown.webp" width="100%" alt="The ice crown tumbling, molten gold sloshing inside it" /></a>
+
 Molten gold sloshing inside a frosted ice crown, in the browser with WebGPU.
 
 The gold is a Position-Based Fluid ([Three Blocks](https://threejs-blocks.com) `PBF`) held in a thin cavity inside the crown by a signed-distance-field constraint, drawn as one smooth surface with the Three Blocks screen-space water renderer. The ice is a `MeshTransmissionNodeMaterial` that refracts the gold and the backdrop behind it. The crown turns on its own; grab it to turn it yourself, throw it, and watch the gold follow.
