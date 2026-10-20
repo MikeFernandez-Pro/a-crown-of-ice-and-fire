@@ -3,9 +3,9 @@
 //
 // The ice is the model itself (public/ice-crystal-crown.glb), rounded by Taubin
 // smoothing as its sharpness drops. The gold's cavity is the model set back by
-// the ice thickness, from its distance field (public/crystal-field.bin, baked
-// by stream1018-tools/bake-sdf.mjs). The fluid starts filling the cavity in the
-// crown's shape and melts down under gravity.
+// the ice thickness, from its distance field (computed on the GPU as the page
+// loads, src/field.js). The fluid starts filling the cavity in the crown's
+// shape and melts down under gravity.
 import * as THREE from 'three/webgpu';
 import {
   Fn,
@@ -35,22 +35,17 @@ import { WaterSurfaceRenderer } from 'three-blocks/water';
 import { MeshTransmissionNodeMaterial } from 'three-blocks/transmission';
 import { isosurface } from './marching.js';
 import { weld, rounded } from './rounding.js';
+import { distanceField } from './field.js';
 
 const MODEL = '/ice-crystal-crown.glb';
-// what bake-sdf.mjs printed for crystal-field.bin:
-//   node bake-sdf.mjs ice-crystal-crown.glb crystal-field.bin 200 --margin 0.03
-const FIELD = {
-  url: '/crystal-field.bin',
-  dims: [198, 186, 200],
-  min: [-0.5406786456980657, -0.047216897551546455, -0.5461400612113403],
-  voxelSize: 0.0054614006121134024,
-  modelSize: 0.99951171875,
-};
+// the crown's distance field: this many cells along its longest side, and a
+// grid reaching this far out of it, for surfaces drawn outside it
+const FIELD_SAMPLES = 200;
+const FIELD_MARGIN = 0.03;
 // The fluid's tuning (gravity, kernel, speeds) expects a scene tens of units
 // across, as in the library's examples, so the simulation runs with the crown
 // 40 units wide and the group scales it back down to 2 for display.
 const SIM_SIZE = 40;
-const SIM = SIM_SIZE / FIELD.modelSize; // field units -> simulation units
 const DISPLAY = 2 / SIM_SIZE; // simulation units -> scene units
 const FIXED_STEP = 1 / 120;
 
@@ -127,18 +122,8 @@ const crown = new THREE.Group();
 crown.scale.setScalar(DISPLAY);
 scene.add(crown);
 
-// --- the field
-const field = await fetch(FIELD.url)
-  .then((r) => r.arrayBuffer())
-  .then((buffer) => {
-    const half = new Uint16Array(buffer);
-    const data = new Float32Array(half.length);
-    for (let i = 0; i < half.length; i++) data[i] = THREE.DataUtils.fromHalfFloat(half[i]);
-    return { ...FIELD, data };
-  });
-
-// the model, welded once for rounding; its centre, in field units, puts the
-// simulation round the origin
+// --- the model, welded once for rounding; its centre, in field units, puts
+// the simulation round the origin
 const model = await new GLTFLoader().loadAsync(MODEL);
 let modelMesh;
 model.scene.traverse((o) => o.isMesh && (modelMesh = o));
@@ -147,6 +132,10 @@ const modelGeometry = modelMesh.geometry.clone().applyMatrix4(modelMesh.matrixWo
 const welded = weld(modelGeometry);
 modelGeometry.computeBoundingBox();
 const centre = modelGeometry.boundingBox.getCenter(new THREE.Vector3());
+
+// --- the field: the crown's signed distance, computed on the GPU
+const field = await distanceField(modelGeometry, renderer, { samples: FIELD_SAMPLES, margin: FIELD_MARGIN });
+const SIM = SIM_SIZE / field.modelSize; // field units -> simulation units
 
 function surface(iso) {
   const { positions, index } = isosurface(field, iso);

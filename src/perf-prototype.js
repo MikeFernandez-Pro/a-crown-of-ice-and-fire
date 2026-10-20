@@ -9,9 +9,9 @@
 //
 // The ice is the model itself (public/ice-crystal-crown.glb), rounded by Taubin
 // smoothing as its sharpness drops. The gold's cavity is the model set back by
-// the ice thickness, from its distance field (public/crystal-field.bin, baked
-// by stream1018-tools/bake-sdf.mjs). The fluid starts filling the cavity in the
-// crown's shape and melts down under gravity.
+// the ice thickness, from its distance field (computed on the GPU as the page
+// loads, src/field.js). The fluid starts filling the cavity in the crown's
+// shape and melts down under gravity.
 import * as THREE from 'three/webgpu';
 import {
   Fn,
@@ -61,22 +61,17 @@ import { WaterSurfaceRenderer } from 'three-blocks/water';
 import { MeshTransmissionNodeMaterial } from 'three-blocks/transmission';
 import { isosurface } from './marching.js';
 import { weld, rounded } from './rounding.js';
+import { distanceField } from './field.js';
 
 const MODEL = `${import.meta.env.BASE_URL}ice-crystal-crown.glb`;
-// what bake-sdf.mjs printed for crystal-field.bin:
-//   node bake-sdf.mjs ice-crystal-crown.glb crystal-field.bin 200 --margin 0.03
-const FIELD = {
-  url: `${import.meta.env.BASE_URL}crystal-field.bin`,
-  dims: [198, 186, 200],
-  min: [-0.5406786456980657, -0.047216897551546455, -0.5461400612113403],
-  voxelSize: 0.0054614006121134024,
-  modelSize: 0.99951171875,
-};
+// the crown's distance field: this many cells along its longest side, and a
+// grid reaching this far out of it, for surfaces drawn outside it
+const FIELD_SAMPLES = 200;
+const FIELD_MARGIN = 0.03;
 // The fluid's tuning (gravity, kernel, speeds) expects a scene tens of units
 // across, as in the library's examples, so the simulation runs with the crown
 // 40 units wide and the group scales it back down to 2 for display.
 const SIM_SIZE = 40;
-const SIM = SIM_SIZE / FIELD.modelSize; // field units -> simulation units
 const DISPLAY = 2 / SIM_SIZE; // simulation units -> scene units
 
 // --- PROTOTYPE: the quality ladder. Per the Three Blocks performance-ladder
@@ -159,13 +154,14 @@ const settings = {
   // ice
   sharpness: 0.56,
   iceThickness: 0.012,
-  frost: 0.22,
+  // a cold, bluish veil over the gold: the fire shut in the ice
+  frost: 0.3,
   ior: 1.31,
   iceTint: '#a9d4ff',
   clarity: 0.9,
   grain: 0.09,
-  opacity: 0.01, // 0 the ice shows only what is behind it, 1 only its own colour
-  iceColor: '#f2f8ff', // the ice's own colour: what milky ice shows, and a light tint on what it lets through
+  opacity: 0.06, // 0 the ice shows only what is behind it, 1 only its own colour
+  iceColor: '#b0d4ff', // the ice's own colour: what milky ice shows, and a light tint on what it lets through
   prism: tier.prism,
   // gold
   fill: 0.35,
@@ -282,33 +278,10 @@ crown.scale.setScalar(DISPLAY);
 scene.add(crown);
 
 
-// --- the field
-// streamed, so the veil can follow it: it is most of what the page downloads.
-// Its decoded size is known from the grid (half floats), whatever the transfer encoding.
-const field = await fetch(FIELD.url)
-  .then(async (response) => {
-    const bytes = new Uint8Array(FIELD.dims[0] * FIELD.dims[1] * FIELD.dims[2] * 2);
-    const reader = response.body.getReader();
-    for (let received = 0; ;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes.set(value, received);
-      received += value.length;
-      loaded(0.75 * (received / bytes.length));
-    }
-    return bytes.buffer;
-  })
-  .then((buffer) => {
-    const half = new Uint16Array(buffer);
-    const data = new Float32Array(half.length);
-    for (let i = 0; i < half.length; i++) data[i] = THREE.DataUtils.fromHalfFloat(half[i]);
-    return { ...FIELD, data };
-  });
-
-// the model, welded once for rounding; its centre, in field units, puts the
-// simulation round the origin
+// --- the model, welded once for rounding; its centre, in field units, puts
+// the simulation round the origin
 const model = await new GLTFLoader().loadAsync(MODEL);
-loaded(0.8);
+loaded(0.5);
 let modelMesh;
 model.scene.traverse((o) => o.isMesh && (modelMesh = o));
 model.scene.updateMatrixWorld(true);
@@ -316,6 +289,11 @@ const modelGeometry = modelMesh.geometry.clone().applyMatrix4(modelMesh.matrixWo
 const welded = weld(modelGeometry);
 modelGeometry.computeBoundingBox();
 const centre = modelGeometry.boundingBox.getCenter(new THREE.Vector3());
+
+// --- the field: the crown's signed distance, computed on the GPU
+const field = await distanceField(modelGeometry, renderer, { samples: FIELD_SAMPLES, margin: FIELD_MARGIN });
+loaded(0.8);
+const SIM = SIM_SIZE / field.modelSize; // field units -> simulation units
 
 
 function surface(iso) {
@@ -1084,7 +1062,7 @@ function showState() {
 // blends additively, so the ice drawn over the gold adds its zero instead of
 // erasing the glow underneath it. With post-processing off, the scene renders
 // straight to the screen as before.
-const fx = { post: true, bloom: true, strength: 0.1, radius: 0 };
+const fx = { post: true, bloom: true, strength: 0.07, radius: 0 };
 const scenePass = pass(scene, camera);
 const sceneOutputs = mrt({ output, emissive });
 sceneOutputs.setBlendMode('emissive', new THREE.BlendMode(THREE.AdditiveBlending));

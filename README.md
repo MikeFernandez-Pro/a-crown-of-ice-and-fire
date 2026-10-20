@@ -25,8 +25,8 @@ Needs a browser with WebGPU (recent Chrome or Edge).
 
 - `src/perf-prototype.js`: the scene `index.html` loads, with the quality tiers, timing overlay and tuning panels.
 - `src/main.js`: the earlier single-tier version, kept for reference.
-- `src/marching.js`, `src/rounding.js`: marching cubes over the crown's distance field (the gold's cavity), and Taubin smoothing for rounding the ice.
-- `public/crystal-field.bin`: the crown's signed distance field, baked from the model.
+- `src/field.js`: the crown's signed distance field, computed on the GPU from the model as the page loads ([three-mesh-bvh](https://github.com/gkjohnson/three-mesh-bvh)'s compute traversals: a winding count for the sign, the closest point for the distance).
+- `src/marching.js`, `src/rounding.js`: marching cubes over that field (the gold's cavity), and Taubin smoothing for rounding the ice.
 
 ## Credits
 
